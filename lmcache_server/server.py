@@ -35,14 +35,15 @@ class LMCacheServer:
 
                 # pick the message to send, priority to the one with the least amount of request
                 ip_message_count = []
-                total_holding_messages_count = 0
+                # total_holding_messages_count = 0
                 for ip in ips:
                     ip_message_count.append(self.data_store[ip][0])
-                    total_holding_messages_count += self.data_store[ip][0]
-                ip_probability = np.array(ip_message_count) / total_holding_messages_count
-                ip_probability = [1 - x for x in ip_probability]
+                    # total_holding_messages_count += self.data_store[ip][0]
+                # ip_probability = np.array(ip_message_count) / total_holding_messages_count
+                # ip_probability = [1 - x for x in ip_probability]
+                ip_probability = 1 / np.array(ip_message_count)
                 ip_probability = softmax(ip_probability)
-                target_ip = random.choices(ips, ip_probability, k=1)
+                target_ip = random.choices(list(ips), ip_probability.tolist(), k=1)
 
                 # pop and get the data to send
                 self.data_store[target_ip][0] -= 1
