@@ -4,15 +4,64 @@ import threading
 import torch
 from io import BytesIO
 from lmcache.protocol import ClientMetaMessage, ServerMetaMessage, Constants
+import numpy as np
+from utils import softmax
+import random
 
 class LMCacheServer:
-    def __init__(self, host, port):
+    def __init__(self, host, port, num_senders=1):
         self.host = host
         self.port = port
+        # the new format is {address: [count, [(socket, request), ...]]}
         self.data_store = {}
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((host, port))
         self.server_socket.listen()
+
+        # enable the sending
+        self.lock = threading.Lock()
+        for _ in range(num_senders):
+            threading.Thread(target=self.send_messages, args=(self.lock,)).start()
+
+    def send_messages(self, lock):
+        while True:
+            if len(self.data_store) == 0:
+                # if there are no requests to be sent, sleep 2 second
+                time.sleep(2)
+            else:
+                # get the data with lock
+                lock.acquire()
+                ips = self.data_store.keys()
+
+                # pick the message to send, priority to the one with the least amount of request
+                ip_message_count = []
+                total_holding_messages_count = 0
+                for ip in ips:
+                    ip_message_count.append(self.data_store[ip][0])
+                    total_holding_messages_count += self.data_store[ip][0]
+                ip_probability = np.array(ip_message_count) / total_holding_messages_count
+                ip_probability = [1 - x for x in ip_probability]
+                ip_probability = softmax(ip_probability)
+                target_ip = random.choices(ips, ip_probability, k=1)
+
+                # pop and get the data to send
+                self.data_store[target_ip][0] -= 1
+                post = self.data_store[target_ip][1].pop(0)
+                assert self.data_store[target_ip][0] == len(self.data_store[target_ip][1])
+                if self.data_store[target_ip][0] == 0:
+                    del self.data_store[target_ip]
+                lock.release()
+
+                # send the data
+                post[0].sendall(post[1])
+
+    def add_data_to_send(self, lock, addr, data):
+        lock.acquire()
+        if addr not in self.data_store:
+            self.data_store[addr] = [0, []]
+        self.data_store[addr][0] += 1
+        self.data_store[addr][1].append(data)
+        lock.release()
 
     def receive_all(self, client_socket, n):
         data = bytearray()
@@ -23,7 +72,7 @@ class LMCacheServer:
             data.extend(packet)
         return data
 
-    def handle_client(self, client_socket):
+    def handle_client(self, lock, client_socket, addr):
         try:
             while True:
                 header = self.receive_all(client_socket, ClientMetaMessage.packlength())
@@ -33,37 +82,26 @@ class LMCacheServer:
 
                 match meta.command:
                     case Constants.CLIENT_PUT:
-                        t0 = time.perf_counter()
                         s = self.receive_all(client_socket, meta.length)
-                        t1 = time.perf_counter()
                         self.data_store[meta.key] = s
-                        t2 = time.perf_counter()
-                        #client_socket.sendall(ServerMetaMessage(Constants.SERVER_SUCCESS, 0).serialize())
-                        #t3 = time.perf_counter()
-                        print(f"Time to receive data: {t1 - t0}, time to store data: {t2 - t1}")
 
                     case Constants.CLIENT_GET:
-                        t0 = time.perf_counter()
                         data_string = self.data_store.get(meta.key, None)
-                        t1 = time.perf_counter()
                         if data_string is not None:
-                            client_socket.sendall(ServerMetaMessage(Constants.SERVER_SUCCESS, len(data_string)).serialize())
-                            t2 = time.perf_counter()
-                            client_socket.sendall(data_string)
-                            t3 = time.perf_counter()
-                            print(f"Time to get data: {t1 - t0}, time to send meta: {t2 - t1}, time to send data: {t3 - t2}")
+                            self.add_data_to_send(lock, addr, ServerMetaMessage(Constants.SERVER_SUCCESS, len(data_string)).serialize())
+                            self.add_data_to_send(lock, addr, data_string)
                         else:
-                            client_socket.sendall(ServerMetaMessage(Constants.SERVER_FAIL, 0).serialize())
+                            self.add_data_to_send(lock, addr, ServerMetaMessage(Constants.SERVER_FAIL, 0).serialize())
 
                     case Constants.CLIENT_EXIST:
                         code = Constants.SERVER_SUCCESS if meta.key in self.data_store else Constants.SERVER_FAIL
-                        client_socket.sendall(ServerMetaMessage(code, 0).serialize())
+                        self.add_data_to_send(lock, addr, ServerMetaMessage(code, 0).serialize())
 
                     case Constants.CLIENT_LIST:
                         keys = list(self.data_store.keys())
                         data = "\n".join(keys).encode()
-                        client_socket.sendall(ServerMetaMessage(Constants.SERVER_SUCCESS, len(data)).serialize())
-                        client_socket.sendall(data)
+                        self.add_data_to_send(lock, addr, ServerMetaMessage(Constants.SERVER_SUCCESS, len(data)).serialize())
+                        self.add_data_to_send(lock, addr, data)
 
         finally:
             client_socket.close()
@@ -74,19 +112,20 @@ class LMCacheServer:
             while True:
                 client_socket, addr = self.server_socket.accept()
                 print(f"Connected by {addr}")
-                threading.Thread(target=self.handle_client, args=(client_socket,)).start()
+                threading.Thread(target=self.handle_client, args=(self.lock, client_socket, addr, )).start()
         finally:
             self.server_socket.close()
 
 if __name__ == "__main__":
     import os, sys
-    if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <host> <port>")
+    if len(sys.argv) != 4:
+        print(f"Usage: {sys.argv[0]} <host> <port> <number of senders>")
         exit(1)
 
     host = sys.argv[1]
     port = int(sys.argv[2])
-    
-    server = LMCacheServer(host, port)
+    num_sender = int(sys.argv[3])
+
+    server = LMCacheServer(host, port, num_sender)
     server.run()
 
