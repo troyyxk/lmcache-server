@@ -12,8 +12,9 @@ class LMCacheServer:
     def __init__(self, host, port, num_senders=1):
         self.host = host
         self.port = port
-        # the new format is {address: [count, [(socket, request), ...]]}
         self.data_store = {}
+        # the format is {address: [count, [(socket, request), ...]]}
+        self.send_queue = {}
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_socket.bind((host, port))
         self.server_socket.listen()
@@ -25,20 +26,21 @@ class LMCacheServer:
 
     def send_messages(self, lock):
         while True:
-            if len(self.data_store) == 0:
+            if len(self.send_queue) == 0:
+                print("No more messages to send, waiting...")
                 # if there are no requests to be sent, sleep 2 second
                 time.sleep(2)
             else:
                 # get the data with lock
                 lock.acquire()
-                ips = self.data_store.keys()
+                ips = self.send_queue.keys()
 
                 # pick the message to send, priority to the one with the least amount of request
                 ip_message_count = []
                 # total_holding_messages_count = 0
                 for ip in ips:
-                    ip_message_count.append(self.data_store[ip][0])
-                    # total_holding_messages_count += self.data_store[ip][0]
+                    ip_message_count.append(self.send_queue[ip][0])
+                    # total_holding_messages_count += self.send_queue[ip][0]
                 # ip_probability = np.array(ip_message_count) / total_holding_messages_count
                 # ip_probability = [1 - x for x in ip_probability]
                 ip_probability = 1 / np.array(ip_message_count)
@@ -46,11 +48,11 @@ class LMCacheServer:
                 target_ip = random.choices(list(ips), ip_probability.tolist(), k=1)
 
                 # pop and get the data to send
-                self.data_store[target_ip][0] -= 1
-                post = self.data_store[target_ip][1].pop(0)
-                assert self.data_store[target_ip][0] == len(self.data_store[target_ip][1])
-                if self.data_store[target_ip][0] == 0:
-                    del self.data_store[target_ip]
+                self.send_queue[target_ip][0] -= 1
+                post = self.send_queue[target_ip][1].pop(0)
+                assert self.send_queue[target_ip][0] == len(self.send_queue[target_ip][1])
+                if self.send_queue[target_ip][0] == 0:
+                    del self.send_queue[target_ip]
                 lock.release()
 
                 # send the data
@@ -58,10 +60,10 @@ class LMCacheServer:
 
     def add_data_to_send(self, lock, addr, data):
         lock.acquire()
-        if addr not in self.data_store:
-            self.data_store[addr] = [0, []]
-        self.data_store[addr][0] += 1
-        self.data_store[addr][1].append(data)
+        if addr not in self.send_queue:
+            self.send_queue[addr] = [0, []]
+        self.send_queue[addr][0] += 1
+        self.send_queue[addr][1].append(data)
         lock.release()
 
     def receive_all(self, client_socket, n):
