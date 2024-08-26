@@ -5,7 +5,7 @@ import torch
 from io import BytesIO
 from lmcache.protocol import ClientMetaMessage, ServerMetaMessage, Constants
 import numpy as np
-from utils import softmax
+from lmcache_server.utils import softmax
 import random
 
 class LMCacheServer:
@@ -21,19 +21,22 @@ class LMCacheServer:
 
         # enable the sending
         self.lock = threading.Lock()
-        for _ in range(num_senders):
-            threading.Thread(target=self.send_messages, args=(self.lock,)).start()
+        for i in range(num_senders):
+            print("### Creating sender " + str(i))
+            threading.Thread(target=self.send_messages, args=(self.lock, i, )).start()
 
-    def send_messages(self, lock):
+    def send_messages(self, lock, ind):
         while True:
+            lock.acquire()
             if len(self.send_queue) == 0:
-                print("No more messages to send, waiting...")
+                print("### Sender[{0}], see no quest to be send, sleep for 2 second.".format(str(ind)))
+                lock.release()
                 # if there are no requests to be sent, sleep 2 second
                 time.sleep(2)
             else:
                 # get the data with lock
-                lock.acquire()
-                ips = self.send_queue.keys()
+                print("### Sender[{0}], ready to send a message.".format(str(ind)))
+                ips = list(self.send_queue.keys())
 
                 # pick the message to send, priority to the one with the least amount of request
                 ip_message_count = []
@@ -45,7 +48,7 @@ class LMCacheServer:
                 # ip_probability = [1 - x for x in ip_probability]
                 ip_probability = 1 / np.array(ip_message_count)
                 ip_probability = softmax(ip_probability)
-                target_ip = random.choices(list(ips), ip_probability.tolist(), k=1)
+                target_ip = random.choices(list(ips), ip_probability.tolist(), k=1)[0]
 
                 # pop and get the data to send
                 self.send_queue[target_ip][0] -= 1
@@ -53,17 +56,20 @@ class LMCacheServer:
                 assert self.send_queue[target_ip][0] == len(self.send_queue[target_ip][1])
                 if self.send_queue[target_ip][0] == 0:
                     del self.send_queue[target_ip]
+                print("### Sender[{0}], has sent a message.".format(str(ind)))
                 lock.release()
 
                 # send the data
                 post[0].sendall(post[1])
 
-    def add_data_to_send(self, lock, addr, data):
+    def add_data_to_send(self, lock, client_socket, addr, data):
         lock.acquire()
+        print("### Add a message to be sent.")
         if addr not in self.send_queue:
             self.send_queue[addr] = [0, []]
         self.send_queue[addr][0] += 1
-        self.send_queue[addr][1].append(data)
+        self.send_queue[addr][1].append((client_socket, data))
+        print("### Finished adding a message to be sent.")
         lock.release()
 
     def receive_all(self, client_socket, n):
@@ -91,20 +97,20 @@ class LMCacheServer:
                     case Constants.CLIENT_GET:
                         data_string = self.data_store.get(meta.key, None)
                         if data_string is not None:
-                            self.add_data_to_send(lock, addr, ServerMetaMessage(Constants.SERVER_SUCCESS, len(data_string)).serialize())
-                            self.add_data_to_send(lock, addr, data_string)
+                            self.add_data_to_send(lock, client_socket, addr, ServerMetaMessage(Constants.SERVER_SUCCESS, len(data_string)).serialize())
+                            self.add_data_to_send(lock, client_socket, addr, data_string)
                         else:
-                            self.add_data_to_send(lock, addr, ServerMetaMessage(Constants.SERVER_FAIL, 0).serialize())
+                            self.add_data_to_send(lock, client_socket, addr, ServerMetaMessage(Constants.SERVER_FAIL, 0).serialize())
 
                     case Constants.CLIENT_EXIST:
                         code = Constants.SERVER_SUCCESS if meta.key in self.data_store else Constants.SERVER_FAIL
-                        self.add_data_to_send(lock, addr, ServerMetaMessage(code, 0).serialize())
+                        self.add_data_to_send(lock, client_socket, addr, ServerMetaMessage(code, 0).serialize())
 
                     case Constants.CLIENT_LIST:
                         keys = list(self.data_store.keys())
                         data = "\n".join(keys).encode()
-                        self.add_data_to_send(lock, addr, ServerMetaMessage(Constants.SERVER_SUCCESS, len(data)).serialize())
-                        self.add_data_to_send(lock, addr, data)
+                        self.add_data_to_send(lock, client_socket, addr, ServerMetaMessage(Constants.SERVER_SUCCESS, len(data)).serialize())
+                        self.add_data_to_send(lock, client_socket, addr, data)
 
         finally:
             client_socket.close()
