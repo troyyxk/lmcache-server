@@ -68,8 +68,8 @@ class LMCacheServer:
         finally:
             client_socket.close()
 
-    def run(self):
-        print(f"Server started at {self.host}:{self.port}")
+    def run(self, type=""):
+        print(f"{type} Server started at {self.host}:{self.port}")
         try:
             while True:
                 client_socket, addr = self.server_socket.accept()
